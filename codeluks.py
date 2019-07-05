@@ -3,7 +3,12 @@ import subprocess
 import random
 import datetime
 import time
+#ViennaRNA python3 library (https://www.tbi.univie.ac.at/RNA/documentation.html)
 sys.path.append('/home/lugoibel/ViennaRNA/interfaces/Python3')
+#NUPACK suite (http://www.nupack.org/partition/new) that employs a modified wrapper originally by:
+#Salis, H., Mirsky, E., & Voigt, C. (2009).
+#Automated design of synthetic ribosome binding sites to control protein expression.
+#Nature Biotechnology, 27(10), 946-950.
 sys.path.append('/home/lugoibel/nupack3.2.2/python')
 import RNA
 from NuPACK import NuPACK
