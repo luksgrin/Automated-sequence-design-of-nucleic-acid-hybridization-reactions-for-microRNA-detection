@@ -1,20 +1,17 @@
-import sys
-import subprocess
-import random
-import datetime
-import time
-#ViennaRNA python3 library (https://www.tbi.univie.ac.at/RNA/documentation.html)
+import sys, json
+from random import choice, random, randint
+from datetime import datetime as date
+from time import time
+from math import exp
 sys.path.append('/home/lugoibel/ViennaRNA/interfaces/Python3')
-#NUPACK suite (http://www.nupack.org/partition/new) that employs a modified wrapper originally by:
-#Salis, H., Mirsky, E., & Voigt, C. (2009).
-#Automated design of synthetic ribosome binding sites to control protein expression.
-#Nature Biotechnology, 27(10), 946-950.
 sys.path.append('/home/lugoibel/nupack3.2.2/python')
 import RNA
-from NuPACK import NuPACK
+cofold = RNA.cofold
+from NuPACK import NuPACK, TmpCleaner
 import plotly.plotly as py
 import plotly.offline as offline
 import plotly.graph_objs as go
+
 
 #########################################
 #                                       #
@@ -23,7 +20,7 @@ import plotly.graph_objs as go
 #########################################
 
 #Start time
-start_time = time.time()
+start_time = time()
 #Vienna parameters:
     #Mathews parameterfile
 RNA.read_parameter_file(
@@ -34,25 +31,307 @@ RNA.cvar.dangles = 0
 RNA.cvar.nc_fact = 1
 #Define nucleotides
 NUCS = ['A','T','G','C']
-#Define circuit sequence names
-GUIDE = [
-    'miRNA',
-    'sensor',
-    'transducer',
-    'clamp',
-    'T7p',
-    'fuel']
 #Boltzmann function parameters
 BETA = 1/0.593
-NUM_e = 2.7182818284590452353
 DGbp = -1.25
 #Metropolis parameters
 Bm0 = 1100        #con 1e3  no converge
 D = 1.00007
-#Define shadow circuit constant components
-shdw = {'S2': 'TGAGATGTAAAGGATGAGTGAGATG',
-    'T2': 'CACTCATCCTTTACATCTCAAACACTCTATTCA'}
 
+#########################################
+#                                       #
+#        DEFINITION OF CLASSES          #
+#                                       #
+#########################################
+
+#Define circuit class which contains circuit sequences and score
+class Circuit:
+    
+    __GUIDE__ = ['miRNA', 'sensor', 'transducer', 'clamp', 'T7p', 'fuel']
+    __mutlist__ = ['sensor', 'transducer', 'clamp', 'fuel']
+    
+    def __init__(self, name, miRNA):
+        self.name = name
+        self.miRNA = miRNA
+        self.T7p = 'GCGCTAATACGACTCACTATAGG' #T7p sequence
+        
+        #Initial circuit sequences generator
+        n = len(self.miRNA)
+        rootseq = (self.miRNA.upper()
+            + randseq(5)
+            + self.T7p)
+        self.sensor = revcomp(
+            rootseq[: n+8])
+        self.transducer = rootseq[6:]
+        self.clamp = revcomp(
+            rootseq[n - 1 :])
+        self.fuel = rootseq[6: n+8]
+        self.scoring()        
+    
+    #Duplicate class function
+    def duplicate(self, circuit):
+        for element in circuit.__dict__:
+            setattr(self, element, getattr(circuit, element))
+        
+    #Scoring function
+    def scoring(self):
+        
+        #Ideal Equilibrium complexes
+        complexes = {'miRNA_sensor': Complex(self.miRNA, self.sensor),
+            'sensor_transducer': Complex(self.sensor, self.transducer),
+            'transducer_clamp': Complex(self.transducer, self.clamp),
+            'clamp_T7p': Complex(self.clamp, self.T7p),
+            'fuel_sensor': Complex(self.fuel, self.sensor)}
+        
+        #Define Boltzmann function
+        def bolfunc(key):
+            
+            Numerator = exp(- BETA*complexes[key].DG)
+            Denominator = Numerator
+
+            if key == 'miRNA_sensor':
+                SecondKey = 'sensor_transducer'
+
+            elif key == 'transducer_clamp':
+                SecondKey = 'clamp_T7p'
+
+            elif key == 'fuel_sensor':
+                SecondKey = 'miRNA_sensor'
+            
+            Denominator += exp(- BETA*complexes[SecondKey].DG)
+            
+            return Numerator/Denominator
+        
+        #Define function for probability calculation employed in
+        #secondary pairments
+        def probfunc(key):
+            
+            Numerator = exp(- BETA*complexes[key].DG)
+
+            if key == 'sensor_transducer':
+                L = 19
+
+            if key == 'clamp_T7p':
+                L = len(self.T7p)
+            
+            Denominator = exp(- BETA*L*DGbp)
+            
+            func = Numerator/Denominator
+
+            if func > 1:
+                func = 1
+                
+            return func
+        
+        #Define toehold score function
+        def toeholdscore():
+            
+            DIST = (len(self.transducer)
+                - len(self.T7p)
+                + 3)
+            struct = (complexes['sensor_transducer'].SS
+                .split('&')
+                [1]
+                [(DIST-6):DIST])
+            i = 0
+
+            for symbol in struct:
+                if symbol == '.':
+                    i += 1
+            
+            return i
+        
+        #Calculates pair probabilities and Score
+        self.score = (bolfunc('miRNA_sensor')
+            *bolfunc('transducer_clamp')
+            *probfunc('sensor_transducer')
+            *probfunc('clamp_T7p')
+            *bolfunc('fuel_sensor')
+            *(6 - toeholdscore())/6)
+        self.stdscore = self.score/probfunc('clamp_T7p')*100
+        
+        return None
+    
+    #Define mutation function
+    def mutate(self):
+                
+        #Chooses a random base from a random sequence from ensemble
+        target_name = choice(self.__mutlist__)
+        target_seq = list(getattr(self, target_name))
+        position = randint(0, (len(target_seq) - 1))
+        base = choice(NUCS)
+
+        while base == target_seq[position]:
+            base = choice(NUCS)
+    
+        #Writes the mutated sequence
+        target_seq[position] = base
+        target_seq = ''.join(target_seq)
+        setattr(self, target_name, target_seq)
+        
+        self.scoring()
+        
+        return None
+
+#Define complex class
+class Complex:
+    
+    def __init__(self, seq1, seq2):
+        (ss, self.DG) = cofold(
+            (seq1
+            + '&'
+            + seq2))
+        self.SS = (ss[: len(seq1)]
+            + '&'
+            + ss[len(seq1) :-1]) 
+
+#Define test-tube class with final equilibriums prediction by means of NuPACK
+class Test_tube:
+
+    def __init__(self, OBJECT, MODE='TOTAL'):
+        self.name = OBJECT.name
+        concent = [1e-6, 1e-6]
+        
+        if __name__ == '__main__':
+            print('Calculating test-tube NuPACK simulation')
+        
+        if isinstance(OBJECT, Circuit) and MODE == 'TOTAL':
+            guide = OBJECT.__GUIDE__[:-1]
+            concent += [1e-6, 1e-6]
+        elif isinstance(OBJECT, Circuit) and MODE == 'FUEL':
+            guide = (OBJECT.__GUIDE__[0:2]
+                + [OBJECT.__GUIDE__[-1]])[::-1]
+        
+        seq_list = []
+        
+        for el in guide:
+            seq_list += [getattr(OBJECT, el)]
+        
+        eq1 = NuPACK(
+            Sequence_List=seq_list,
+            material='dna')
+        eq2 = NuPACK(
+            Sequence_List=seq_list,
+            material='dna')
+        
+        eq1.complexes(
+            dangles='none',
+            MaxStrands=2,
+            quiet=True)
+        eq2.complexes(
+            dangles='none',
+            MaxStrands=2,
+            quiet=True)
+        
+        eq1.concentrations(
+            concentrations=[1e-6] + concent,
+            quiet=True)
+        eq2.concentrations(
+            concentrations=[1e-9] + concent,
+            quiet=True)
+        
+        (g1, eq1) = self.eqcon(eq1, guide)
+        (g2, eq2) = self.eqcon(eq2, guide)
+        
+        self.eq1 = eq1
+        self.eq2 = eq2
+        self.__GUIDES__ = [g1, g2]
+    
+    #Define a function that interprets NuPACK output files
+    def eqcon(self, dict, guide):
+        outlist = []
+        outdict = {}
+
+        for el in dict['complexes_concentrations']:
+            stand = round((float(el[-1])/1e-8), 2)
+
+            if stand < 0.1:
+                continue
+
+            cmplx = list(map(int, el[0:-2]))
+
+            name = []
+            i = -1
+            for n in cmplx:
+                i += 1
+
+                if n:
+                    name += n*[guide[i]]
+
+            name = '_'.join(name)
+
+            outlist += [name]
+            outdict[name] = [el[-1], stand]
+        return outlist, outdict
+
+
+#Define shadow circuit generation function
+class shadowcirc:
+    
+    __GUIDE__ = ['S2', 'T2', 'AND', 'AND_clamp']
+    __mutlist__ = ['AND', 'AND_clamp']
+        
+    def __init__(self, circuitobject):
+        self.S2 = 'TGAGATGTAAAGGATGAGTGAGATG'
+        self.T2 = 'CACTCATCCTTTACATCTCAAACACTCTATTCA'    
+            
+        
+        MFE = cofold(
+            circuitobject.sensor
+            + '&'
+            + circuitobject.transducer)[1]
+
+        mfe = cofold(
+            self.S2
+            + '&'
+            + self.T2)[1]
+    
+        b_area = self.S2[:-5]
+    
+        if MFE < -31:
+            times = int((MFE + 31)/3) + 4
+        
+            for n in range(times):
+                b_area += choice(NUCS)
+        i = 0
+        while abs(MFE - mfe) > 0:
+        
+            i += 1
+            target_index = randint(0, (len(b_area) - 1))
+
+            b_area = list(b_area)
+            base = choice(NUCS)
+
+            while base == b_area[target_index]:
+                base = choice(NUCS)
+
+            b_area[target_index] = base
+            b_area = ''.join(b_area)
+
+            self.S2 = (b_area
+            + self.S2[-5:])
+
+            self.T2 = (revcomp(b_area)
+                + self.S2[-13:])
+
+            mfe = cofold(
+                self.S2
+                + '&'
+                + self.T2)[1]
+
+            if i == 1000:
+                break
+        
+            for el in NUCS:
+                if (4*el) in b_area:
+                    mfe = 1e3
+        
+        master = (self.T2[-20:]
+            + circuitobject.transducer[:19])
+    
+        self.AND_clamp = master[7:-6]
+        self.AND = revcomp(master)
+            
 #########################################
 #                                       #
 #       DEFINITION OF FUNCTIONS         #
@@ -61,8 +340,7 @@ shdw = {'S2': 'TGAGATGTAAAGGATGAGTGAGATG',
 
 #Define command line input system
 def cmdinput():
-    global USERINPUT
-    global GUIDE
+    global USERINPUT, NAME, MIRNA
     looping = True
     while looping:
         if 'U' in USERINPUT:
@@ -72,12 +350,13 @@ def cmdinput():
         #Checks if input is a sequence of adequate length
         if (UNIQ.issubset(NUCS) and
                 len(USERINPUT) >= 20):
-            seqs_preit[GUIDE[0]] = USERINPUT[:25]
+            NAME = 'miRNA_Circuit'
+            MIRNA = USERINPUT[:25]
             looping = False
         #Checks if input is meant to be a test
         elif USERINPUT == 'TEST':
-            GUIDE = ['Rodrigo_miRNA'] + GUIDE[1:]
-            seqs_preit['Rodrigo_miRNA'] = 'TGGAGTGTGACAATGGTGTTTG'
+            NAME = 'Rodrigo_Circuit'
+            MIRNA = 'TGGAGTGTGACAATGGTGTTTG'
             looping = False
         #Exit system
         elif USERINPUT == 'EXIT':
@@ -99,7 +378,8 @@ def fileinput():
         line = line.strip('\n')
 
         if line[0] == '>':
-            key = line[1:].split()[0]
+            key = (line[1:].split()[0]
+                + '_Circuit')
             value = ''
 
         else:
@@ -112,270 +392,45 @@ def fileinput():
 
 #Define reverse complementary generator
 def revcomp(seq):
-    seq = seq.upper(
-        ).replace('A','t'
-        ).replace('T','a'
-        ).replace('G','c'
-        ).replace('C','g'
-        )[::-1].upper()
+    seq = (seq
+        .upper()
+        .replace('A','t')
+        .replace('T','a')
+        .replace('G','c')
+        .replace('C','g')
+        [::-1]
+        .upper())
     return seq
 
 #Random sequence builder
 def randseq(length):
     out = ''
     for n in range(length):
-        out += random.sample(NUCS, 1)[0]
+        out += choice(NUCS)
     return out
 
-#Define circuit core sequences generator
-def genseq(miRNA, prom):
-    n = len(miRNA)
-    rootseq = (miRNA.upper()
-        + randseq(5)#'TATTC'
-        + prom)
-    sensor = revcomp(
-        rootseq[: n+8])
-    transducer = rootseq[6:]
-    clamp = revcomp(
-        rootseq[n - 1 :])
-    fuel = rootseq[6: n + 8]
-    return (sensor,
-        transducer,
-        clamp,
-        fuel)
-
-#Define Boltzmann function
-def bolfunc(seq1, seq2, seq_DG):
-    Pairkey = (seq1
-        + '_'
-        + seq2)
-    
-    Numerator = NUM_e**(- BETA*seq_DG[Pairkey])
-    Denominator = Numerator
-
-    if seq1 == GUIDE[0]:
-        SecondKey = 'sensor_transducer'
-
-    elif seq1 == 'transducer':
-        SecondKey = 'clamp_T7p'
-
-    elif seq1 == 'fuel':
-        SecondKey = GUIDE[0] + '_sensor'
-
-    Denominator += NUM_e**(- BETA*seq_DG[SecondKey])
-    func = Numerator/Denominator
-
-    return func
-
-#Define function for probability calculation employed in
-#secondary pairments
-def probfunc(seq1, seq2, seq_DG, seqs):
-    Pairkey = (seq1
-        + '_'
-        + seq2)
-    Numerator = NUM_e**(- BETA*seq_DG[Pairkey])
-
-    if seq1 == 'sensor':
-        L = 19
-
-    if seq1 == 'clamp':
-        L = len(seqs[GUIDE[4]])
-    Denominator = NUM_e**(- BETA*L*DGbp)
-    func = Numerator/Denominator
-
-    if func > 1:
-        func = 1
-    return func
-
-#Define toehold score function
-def toeholdscore(name, seq_ss):
-    DIST = (len(seqs_preit['transducer'])
-        - len(seqs_preit['T7p'])
-        + 3)
-    struct = seq_ss[name].split(
-        '&'
-        )[1][(DIST-6):DIST]
-    j = 0
-
-    for symbol in struct:
-        if symbol == '.':
-            j += 1
-    return j
-
-#Define Packing and Scoring function.
-def scorefunc(seqs):
-    seq_DG = {}
-    seq_ss = {}
-    i = -1
-    #Saves in a dictionary the MFE and structure of circuit pairs
-    for seq1 in GUIDE[:-2]:
-        i += 1
-        seq2 = GUIDE[i + 1]
-        name = (seq1
-            + '_'
-            + seq2)
-        (ss, mfe) = RNA.cofold(
-            (seqs[seq1]
-            + '&'
-            + seqs[seq2]))
-        seq_DG[name] = mfe
-        seq_ss[name] = (ss[: len(seqs[seq1])]
-            + '&'
-            + ss[(len(seqs[seq1])) :-1])
-
-    (ss, mfe) = RNA.cofold(
-        (seqs['fuel']
-        + '&'
-        + seqs['sensor']))
-    seq_DG['fuel_sensor'] = mfe
-    seq_ss['fuel_sensor'] = (ss[: len(seqs['fuel'])]
-        + '&'
-        + ss[(len(seqs['fuel'])) :-1])
-    #Caulculates pair probabilities and Score
-
-    P1 = bolfunc(
-        GUIDE[0],
-        'sensor',
-        seq_DG)
-    P2 = bolfunc(
-        'transducer',
-        'clamp',
-        seq_DG)
-    P3 = probfunc(
-        'sensor',
-        'transducer',
-        seq_DG,
-        seqs)
-    P4 = probfunc(
-        'clamp',
-        'T7p',
-        seq_DG,
-        seqs)
-    P5 = bolfunc(
-        'fuel',
-        'sensor',
-        seq_DG)
-    T = toeholdscore('sensor_transducer', seq_ss)
-
-    score = P1*P2*P3*P4*P5*(6-T)/6
-    dats = [P1,P2,P3,P4,P5,T,score]
-    return dats
-
-#Define mutation function
-def mutf(seqs):
-    seqs_aftermutation = {}
-    
-    #Creates a new dictionary with sequences
-    for element in seqs:
-        seqs_aftermutation[element] = seqs[element]
-    
-    #Creates a new guidelist excluding miRNA and T7p
-    mutlist = GUIDE[1:-2] + [GUIDE[-1]]
-    
-    #Chooses a random base from a random sequence from ensemble
-    target_name = random.sample(mutlist, 1)[0]
-    target_seq = list(seqs[target_name])
-    position = random.randint(0, (len(target_seq) - 1))
-    base = random.sample(NUCS, 1)[0]
-
-    while base == target_seq[position]:
-        base = random.sample(NUCS, 1)[0]
-    
-    #Writes the mutated sequence
-    target_seq[position] = base
-    target_seq = ''.join(target_seq)
-    seqs_aftermutation[target_name] = target_seq
-    
-    return seqs_aftermutation
-
-#Define a function that interprets NuPACK output files
-def eqcon(dict, guide):
-    outlist = []
-    outdict = {}
-
-    for el in dict['complexes_concentrations']:
-        stand = round((float(el[-1])/1e-8), 2)
-
-        if stand < 0.1:
-            continue
-
-        cmplx = list(map(int, el[0:-2]))
-
-        name = []
-        i = -1
-        for n in cmplx:
-            i += 1
-
-            if n:
-                name += n*[guide[i]]
-
-        name = '_'.join(name)
-
-        outlist += [name]
-        outdict[name] = [el[-1], stand]
-    return outlist, outdict
-
-#Define test-tube prediction of final equilibriums by means of NuPACK
-def test_tube(seqs, guide):
-    print('Calculating test-tube NuPACK simulation')
-    seq_list = []
-    concent = [1e-6, 1e-6]
-
-    if 'fuel' not in guide:
-        concent += [1e-6, 1e-6]
-
-    for el in guide:
-        seq_list += [seqs[el]]
-
-    eq_1 = NuPACK(
-        Sequence_List=seq_list,
-        material='dna')
-    eq_2 = NuPACK(
-        Sequence_List=seq_list,
-        material='dna')
-
-    eq_1.complexes(
-        dangles='none',
-        MaxStrands=2,
-        quiet=True)
-    eq_2.complexes(
-        dangles='none',
-        MaxStrands=2,
-        quiet=True)
-
-    eq_1.concentrations(
-        concentrations=[1e-6] + concent,
-        quiet=True)
-    eq_2.concentrations(
-        concentrations=[1e-9] + concent,
-        quiet=True)
-
-    (eq_1order, eq_1) = eqcon(eq_1, guide)
-    (eq_2order, eq_2) = eqcon(eq_2, guide)
-    EQUILIBRIUMGUIDES = [eq_1order, eq_2order]
-    return EQUILIBRIUMGUIDES, eq_1, eq_2
-
 #Define bar-chart plot function for NuPACK test-tube prediction
-def eqsbarplot(guides, dict1, dict2):
+def eqsbarplot(TEST_TUBE):
     global timessufix
     dat1 = []
     dat2 = []
-
-    for list in guides:
+    
+    i = -1
+    for list in TEST_TUBE.__GUIDES__:
+        i +=1
         for el in list:
-
-            if guides[0] == list:
-                dat1 += [dict1[el][-1]]
+            if not i:
+                dat1 += [TEST_TUBE.eq1[el][-1]]
 
             else:
-                dat2 += [dict2[el][-1]]
+                dat2 += [TEST_TUBE.eq2[el][-1]]
 
     trace1 = go.Bar(
-        x=guides[0],
+        x=TEST_TUBE.__GUIDES__[0],
         y=dat1,
         name='With input')
     trace2 = go.Bar(
-        x=guides[1],
+        x=TEST_TUBE.__GUIDES__[1],
         y=dat2,
         name='Without input')
 
@@ -387,9 +442,8 @@ def eqsbarplot(guides, dict1, dict2):
     fig = go.Figure(
         data=data,
         layout=layout)
-    filename = ('Equilibrium_study_'
-        + timesuffix
-        + '.html')
+    filename = ('Equilibrium_study_{}.html'
+                    .format(timesuffix))
     offline.plot(
         fig,
         filename=filename,
@@ -398,375 +452,239 @@ def eqsbarplot(guides, dict1, dict2):
     return None
 
 #Define metropolis function to induce random sampling
-def Metropolis():
-    global Dats_preit, Score_preit, seqs_preit
+def Metropolis(ENSEMBLEpre, ENSEMBLEpost):
     Bmk = Bm0*(D**k)
-    M = NUM_e**(
+    M = exp(
         - Bmk*(
-            Score_preit
-            - Score_posit))
+            ENSEMBLEpre.score
+            - ENSEMBLEpost.score))
 
-    if random.random() < M:
-#       print('\nMetropolis MUTATED\n')
-        Dats_preit = Dats_posit
-        Score_preit = Score_posit
-        seqs_preit = seqs_posit
+    if random() < M:
+        ENSEMBLEpre.duplicate(ENSEMBLEpost)
+    
     return None
 
-#Define percentage progress percentage function
-def progress():
-    global perc_0
-    perc_1 = (k/100000)*100
+#Define data and header writing function
+def OutfileWriter(OUTFILE,
+                  ENSEMBLEpre,
+                  SIMULATION1,
+                  FUELSIMULATION1):
 
-    if int(perc_1/5) > int(perc_0/5):
-        perc_0 = perc_1
-        print(
-            'Status: '
-            + str(int(perc_0))
-            + '% completed')
+    def DataExtractor(TestTube, I):
+        eqs = ['eq1', 'eq2']        
+        for el in TestTube.__GUIDES__[I]:
+            
+            OUTFILE.write('{}\t{}\t{}\n'
+                .format(el,
+                        getattr(TestTube, eqs[I])[el][0],
+                        getattr(TestTube, eqs[I])[el][1]))
+            
+        return None
+
+    for el in ENSEMBLEpre.__GUIDE__:
+        OUTFILE.write('>{}\n{}\n'
+            .format(el, getattr(ENSEMBLEpre, el)))
+
+    OUTFILE.write('Score = {}\nStandarized score = {}\n'
+        .format(ENSEMBLEpre.score, ENSEMBLEpre.stdscore))
+            
+    OUTFILE.write('\n{0}WITH INPUT{0}'
+        '\nComplexes\tConcentration (M)\tStandarized (%)\n'
+        .format(6*'-'))
+
+    DataExtractor(SIMULATION1, 0)
+                  
+    OUTFILE.write('\n{0}WITHOUT INPUT{0}'
+        '\nComplexes\tConcentration (M)\tStandarized (%)\n'
+        .format(6*'-'))
+        
+    DataExtractor(SIMULATION1, 1)
+        
+    OUTFILE.write('\nFuel transduction assessment\n'
+        '\n{0}WITH FUEL{0}'
+        '\nComplexes\tConcentration (M)\tStandarized (%)\n'
+        .format(6*'-'))
+    
+    DataExtractor(FUELSIMULATION1, 0)
+
+    OUTFILE.write('\n{0}WITHOUT FUEL{0}'
+        '\nComplexes\tConcentration (M)\tStandarized (%)\n'
+        .format(6*'-'))
+        
+    DataExtractor(FUELSIMULATION1, 1)
+    
+    OUTFILE.write('\n')
+    
     return None
 
-#Define shadow circuit generation function
-def shadowcirc(transducer):
-    outdict = {}
-    
-    for el in shdw:
-        outdict[el] = shdw[el]
-    
-    MFE = RNA.cofold(
-        seqs_preit['sensor']
-        + '&'
-        + seqs_preit['transducer'])[1]
-
-    mfe = RNA.cofold(
-        outdict['S2']
-        + '&'
-        + outdict['T2'])[1]
-    
-    b_area = outdict['S2'][:-5]
-    
-    if MFE < -31:
-        times = int((MFE + 31)/3) + 4
+#Circuit object serialization function
+def serialize_circuit(obj):    
+    if isinstance(obj, Circuit):
+        Ser = obj.__dict__
+        Ser['__class__'] = Circuit.__name__
         
-        for n in range(times):
-            b_area += random.sample(NUCS, 1)[0]
-    i = 0
-    while abs(MFE - mfe) > 0:
-        
-        i += 1
-        target_index = random.randint(0, (len(b_area) - 1))
+        return Ser
 
-        b_area = list(b_area)
-        base = random.sample(NUCS, 1)[0]
+    raise TypeError(str(obj) + ' is not JSON serializable')
 
-        while base == b_area[target_index]:
-            base = random.sample(NUCS, 1)[0]
-
-        b_area[target_index] = base
-        b_area = ''.join(b_area)
-
-        outdict['S2'] = (b_area
-            + outdict['S2'][-5:])
-
-        outdict['T2'] = (revcomp(b_area)
-            + outdict['S2'][-13:])
-
-        mfe = RNA.cofold(
-            outdict['S2']
-            + '&'
-            + outdict['T2'])[1]
-
-        if i == 1000:
-            break
-        
-        for el in NUCS:
-            if (4*el) in b_area:
-                mfe = 1e3
-        
-    master = (outdict['T2'][-20:]
-        + transducer[:19])
-    
-    AND_clamp = master[7:-6]
-    AND = revcomp(master)
-    
-    outdict['AND_clamp'] = AND_clamp
-    outdict['AND'] = AND
-    
-    keyss = []
-    for el in outdict.keys():
-        keyss += [el]
-    keyss.sort()
-    
-    return outdict, keyss 
+#Circuit object deserialization function
+def deserialize_circuit(obj):
+    if '__class__' in obj:
+        if obj['__class__'] == 'Circuit':
+            Circ = Circuit(obj['name'], obj['miRNA'])
+            del obj['__class__']
+            Circ.__dict__ = obj
+                        
+            return Circ
 
 #MAIN
-def main():
-    global k, timesuffix, perc_0, seqs_preit, seqs_posit
-    global Score_preit, Score_posit, Dats_preit, Dats_posit
+def main(NAME, MIRNA):
+    global k, timesuffix, perc_0
         
     #Moment in time:
     timesuffix = '_'.join(
-        str(datetime.datetime.now()
+        str(date.now()
         ).split())
-
-    (seqs_preit['sensor'],
-    seqs_preit['transducer'],
-    seqs_preit['clamp'],
-    seqs_preit['fuel']) = genseq(seqs_preit[GUIDE[0]], seqs_preit['T7p'])
-
-    Dats_preit = scorefunc(seqs_preit)
-    Score_preit = Dats_preit[-1]
-
-    (equilibriumguide,
-    eq_1,
-    eq_2) = test_tube(seqs_preit, GUIDE[:-1])
-
-    fuelguide = GUIDE[:2] + [GUIDE[-1]]
-    fuelguide = fuelguide[::-1]
-
-    (equilibriumguide_fuel,
-    w_fuel,
-    wo_fuel) = test_tube(seqs_preit, fuelguide)
-        
-    OUTFILE = open(
-        'Output_'
-        + GUIDE[0]
-        + '_'
-        + timesuffix
-        + '.txt',
-        'w')
-    OUTFILE.write('This is the output of your job done on '
-        + timesuffix
-        + '\n')
-
-    for el in GUIDE:
-        OUTFILE.write('>'
-            + el
-            + '\n'
-            + seqs_preit[el]
-            + '\n')
-        
-    OUTFILE.write('\nP1 = ' + str(Dats_preit[0]) + '\n')
-    OUTFILE.write('P2 = ' + str(Dats_preit[1]) + '\n')
-    OUTFILE.write('P3 = ' + str(Dats_preit[2]) + '\n')
-    OUTFILE.write('P4 = ' + str(Dats_preit[3]) + '\n')
-    OUTFILE.write('P5 = ' + str(Dats_preit[4]) + '\n')
-    OUTFILE.write('Toehold = ' + str(Dats_preit[5]) + '\n')
-    OUTFILE.write('Score = ' + str(Score_preit) + '\n')
-    OUTFILE.write('Standarized score = '
-        + str(Score_preit*100/Dats_preit[3])
-        + '\n')
-
-
-    OUTFILE.write('\n------WITH INPUT------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide[0]:
-        OUTFILE.write(el
-            + '\t'
-            + eq_1[el][0]
-            + '\t'
-            + str(eq_1[el][1])
-            + '\n')
-
-    OUTFILE.write('\n------WITHOUT INPUT------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide[1]:
-        OUTFILE.write(el
-            + '\t'
-            + eq_2[el][0]
-            + '\t'
-            + str(eq_2[el][1])
-            + '\n')
-
-    OUTFILE.write('\nFuel transduction assessment\n')
-    OUTFILE.write('\n------WITH FUEL------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide_fuel[0]:
-        OUTFILE.write(el
-            + '\t'
-            + w_fuel[el][0]
-            + '\t'
-            + str(w_fuel[el][1])
-            + '\n')
-
-    OUTFILE.write('\n------WITHOUT FUEL------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide_fuel[1]:
-        OUTFILE.write(el
-            + '\t'
-            + wo_fuel[el][0]
-            + '\t'
-            + str(wo_fuel[el][1])
-            + '\n')
-    OUTFILE.write('\n')
-
-    #1e5 cycles of mutations and selection following the global score
     
-    k = 0
-    perc_0 = 0
+    ENSEMBLEpre = Circuit(NAME, MIRNA)  
+        
+    if __name__ == '__main__':
+    
+        SIMULATION1 = Test_tube(ENSEMBLEpre)
+        FUELSIMULATION1 = Test_tube(ENSEMBLEpre, 'FUEL')
+    
+        OUTFILE = open('Output_{}_{}.txt'
+            .format(ENSEMBLEpre.name, timesuffix),
+                        'w')
+        
+        OUTFILE.write('This is the output of your job done on {}\n'
+            .format(timesuffix))
+        
+        OutfileWriter(OUTFILE,
+                      ENSEMBLEpre,
+                      SIMULATION1,
+                      FUELSIMULATION1)
 
-    for n in range(int(1e5)):
-        k += 1
-        seqs_posit = mutf(seqs_preit)
-        Dats_posit = scorefunc(seqs_posit)
-        Score_posit = Dats_posit[-1]
+        toolbar = 40
+        perc = 0
+        print('Progress:')
+    
+        sys.stdout.write('{}% [{}]\033[92m'
+            .format(perc, ' '*toolbar))
+    
+        sys.stdout.flush()
+        sys.stdout.write('\b'*(toolbar+6))
 
-        if Score_posit >= Score_preit:
-            Dats_preit = Dats_posit
-            Score_preit = Score_posit
-            seqs_preit = seqs_posit
-
+        nums = range(toolbar+1)[1:]
+    
+    
+    #1e5 cycles of mutations and selection following the global score  
+    ENSEMBLEpost = Circuit(ENSEMBLEpre.name, ENSEMBLEpre.miRNA)
+    ENSEMBLEpost.duplicate(ENSEMBLEpre)
+    
+    for k in range(int(1+1e5))[1:]: #1e5
+        
+        ENSEMBLEpost.mutate()
+        
+        if ENSEMBLEpost.score >= ENSEMBLEpre.score:
+            ENSEMBLEpre.duplicate(ENSEMBLEpost)
+                    
         else:
-            Metropolis()
+            Metropolis(ENSEMBLEpre, ENSEMBLEpost)
             
-        progress()
+        if __name__ == '__main__':
+            
+            perc = int(k*100/(1e5))
+
+            if int(k*toolbar/1e5) in nums:
+                sys.stdout.write('{}% [{}{}]'
+                    .format(perc,
+                            nums[0]*u'\u2588',
+                            ' '*(toolbar-nums[0])))
+                
+                nums = nums[1:]
+            
+            if k == int(1e5):
+                sys.stdout.write('\n\033[0m')
+
+            sys.stdout.flush()
+            sys.stdout.write('\b'*(toolbar+6))
+    
+    SHADOW = shadowcirc(ENSEMBLEpre)
+    
+    ShadowInfo = ''
+    
+    for el in SHADOW.__GUIDE__:
+          
+        setattr(ENSEMBLEpre, el, getattr(SHADOW, el))
+        ShadowInfo += '>{}\n{}\n'.format(el, getattr(SHADOW, el))
+
+    try:
+        with open('{}_circuit.json'.format(NAME)) as f:
+            Circ = json.load(f,
+                object_hook=deserialize_circuit)
         
-    (equilibriumguide,
-    eq_1,
-    eq_2) = test_tube(seqs_preit, GUIDE[:-1])
-    eqsbarplot(equilibriumguide,
-        eq_1,
-        eq_2)
+        if ENSEMBLEpre.stdscore > Circ.stdscore:
+            with open('{}_circuit.json'.format(NAME), 'w') as f:
+                json.dump(ENSEMBLEpre, f,
+                    default=serialize_circuit)
 
-    (equilibriumguide_fuel,
-    w_fuel,
-    wo_fuel) = test_tube(seqs_preit, fuelguide)
-    #OUTFILE = open('Output_'+GUIDE[0]+timesuffix+'.txt', 'w')
-    #OUTFILE.write('This is the output of your job done on '+timesuffix+'\n')
-
-    for el in GUIDE:
-        OUTFILE.write('>'
-            + el
-            + '\n'
-            + seqs_preit[el]
-            + '\n')
-
-    OUTFILE.write('\nP1 = ' + str(Dats_preit[0]) + '\n')
-    OUTFILE.write('P2 = ' + str(Dats_preit[1]) + '\n')
-    OUTFILE.write('P3 = ' + str(Dats_preit[2]) + '\n')
-    OUTFILE.write('P4 = ' + str(Dats_preit[3]) + '\n')
-    OUTFILE.write('P5 = ' + str(Dats_preit[4]) + '\n')
-    OUTFILE.write('Toehold = ' + str(Dats_preit[5]) + '\n')
-    OUTFILE.write('Score = ' + str(Score_preit) + '\n')
-    OUTFILE.write('Standarized score = '
-        + str(Score_preit*100/Dats_preit[3])
-        + '\n')
-
-    OUTFILE.write('\n------WITH INPUT------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide[0]:
-        OUTFILE.write(el
-            + '\t'
-            + eq_1[el][0]
-            + '\t'
-            + str(eq_1[el][1])
-            + '\n')
-
-    OUTFILE.write('\n------WITHOUT INPUT------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide[1]:
-        OUTFILE.write(el
-            + '\t'
-            + eq_2[el][0]
-            + '\t'
-            + str(eq_2[el][1])
-            + '\n')
-
-    OUTFILE.write('\nFuel transduction assessment\n')
-    OUTFILE.write('\n------WITH FUEL------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide_fuel[0]:
-        OUTFILE.write(el
-            + '\t'
-            + w_fuel[el][0]
-            + '\t'
-            + str(w_fuel[el][1])
-            + '\n')
-
-    OUTFILE.write('\n------WITHOUT FUEL------')
-    OUTFILE.write('\nComplexes')
-    OUTFILE.write('\tConcentration (M)')
-    OUTFILE.write('\tStandarized (%)\n')
-
-    for el in equilibriumguide_fuel[1]:
-        OUTFILE.write(el
-            + '\t'
-            + wo_fuel[el][0]
-            + '\t'
-            + str(wo_fuel[el][1])
-            + '\n')
+    except:
+        with open('{}_circuit.json'.format(NAME), 'w') as f:
+            json.dump(ENSEMBLEpre, f,
+                default=serialize_circuit)
     
+    if __name__ == '__main__':    
+        SIMULATION1 = Test_tube(ENSEMBLEpre)
+        eqsbarplot(SIMULATION1)
     
-    (shadow, shadowguide) = shadowcirc(
-        seqs_preit['transducer'])
-    
-    OUTFILE.write('\nProposed shadow cancellation circuit\n')
-    for el in shadowguide:
-        OUTFILE.write('>'
-            + el
-            + '\n'
-            + shadow[el]
-            +'\n')
+        FUELSIMULATION1 = Test_tube(ENSEMBLEpre, 'FUEL')
+        
+        #OUTFILE = open('Output_{}_{}.txt'
+         #   .format(ENSEMBLEpre.name, timesuffix),
+         #               'w')
+        
+        #OUTFILE.write('This is the output of your job done on {}\n'
+         #   .format(timesuffix))
+                
+        OutfileWriter(OUTFILE,
+                      ENSEMBLEpre,
+                      SIMULATION1,
+                      FUELSIMULATION1)
+            
+        OUTFILE.write('\nProposed shadow cancellation circuit\n')
+        OUTFILE.write(ShadowInfo)    
+        return None
 
-seqs_preit = {}
+    else:
+        return ENSEMBLEpre
+        
+if __name__ == '__main__':
+    #Define initial input
+    try:
+        USERINPUT = sys.argv[1].upper()
+    except:
+        USERINPUT = input('Enter your input: '
+            ).upper()
 
-#T7p sequence
-seqs_preit['T7p'] = 'GCGCTAATACGACTCACTATAGG'
+    #Checks if input is a raw sequence or a fasta file
+    if USERINPUT.lower().split('.')[-1] == 'fasta':
+        insequences = fileinput()
 
-#Define initial input
-try:
-    USERINPUT = sys.argv[1]
-except:
-    USERINPUT = input(
-        'Enter your input: '
-        ).upper()
+        for el in insequences:
+            NAME = el
+            MIRNA = insequences[el]
+            main(NAME, MIRNA)
 
-#Checks if input is a raw sequence or a fasta file
-if USERINPUT.lower().split('.')[-1] == 'fasta':
-    insequences = fileinput()
+    else:
+        cmdinput()
+        main(NAME, MIRNA)
 
-    for el in insequences:
-        GUIDE[0] = el
-        seqs_preit[el] = insequences[el]
-        main()
+    #NuPACK files cleanup
+    TmpCleaner()
+        
+    elapsed_time = str(
+        (time() - start_time)/60)
 
-        for name in GUIDE[1:-1]:
-            del seqs_preit[name]
-else:
-    cmdinput()
-    main()
-
-#NuPACK files cleanup
-#subprocess.call(
-#    'rm -r /home/lugoibel/nupack3.2.2/python/tmp*',
-#    shell=True)
-
-elapsed_time = str(
-    (time.time() - start_time)/60)
-
-print('Job finished on '
-    + str(datetime.datetime.now()).split('.')[0]
-    + '. Elapsed time was: '
-    + elapsed_time[:-13]
-    + ' minutes.')
+    print('Job finished on {}. Elapsed time was: {} minutes.'
+        .format(str(date.now()).split('.')[0], elapsed_time[:-13]))
