@@ -64,7 +64,6 @@ class NuPACK(dict):
         random.seed(time.time())
         long_id = "".join([random.choice(string.ascii_lowercase + string.digits) for x in range(10)])
         self.prefix = current_dir + "/nu_temp_" + long_id
-        
     def complexes(self, MaxStrands, Temp=37.0, ordered="", pairs="", mfe="",
                   degenerate="", dangles="some", timeonly="", quiet="",
                   AdditionalComplexes=[]):
@@ -132,6 +131,7 @@ class NuPACK(dict):
         output = subprocess.call(cmd + args + self.prefix, shell=True)
 
         self._read_output_con()
+
         self._cleanup("ocx")
         self._cleanup("ocx-key")
         self._cleanup("eq")
@@ -333,7 +333,7 @@ class NuPACK(dict):
         #Write input files
         #Input for count is the same as mfe
         self._write_input_mfe(strands)
-
+        
         #Set arguments
         material = self["material"]
         if multi == "": multi = ""
@@ -498,7 +498,7 @@ class NuPACK(dict):
         #Output: energies of unordered complexes in key "unordered_energies"
         #Output: strand composition of unordered complexes in key "unordered_complexes"
 
-        handle = open(self.prefix+".cx", "rU")
+        handle = open(self.prefix+".cx")
 
         line = handle.readline()
 
@@ -546,7 +546,7 @@ class NuPACK(dict):
     #Output: energies of ordered complexes in key "ordered_energies"
     #Output: number of permutations and strand composition of ordered complexes in key "ordered_complexes"
 
-        handle = open(self.prefix+".ocx", "rU")
+        handle = open(self.prefix+".ocx")
 
         line = handle.readline()
 
@@ -601,7 +601,7 @@ class NuPACK(dict):
                 and self.has_key("ordered_composition")):
             self._read_output_ocx(self.prefix)
 
-        handle = open(self.prefix+".ocx-mfe", "rU")
+        handle = open(self.prefix+".ocx-mfe")
 
         #Skip the comments of the text file.
         line = handle.readline()
@@ -651,7 +651,7 @@ class NuPACK(dict):
         handle.close()
 
     def _read_output_con(self):
-        handle = open(self.prefix + ".eq", "rU")
+        handle = open(self.prefix + ".eq")
         inf = []
         for line in handle.readlines():
             if line[0] != "%":
@@ -669,7 +669,7 @@ class NuPACK(dict):
     #Output: total sequence length and minimum free energy
     #Output: list of base pairings describing the secondary structure
 
-        handle = open(self.prefix + ".mfe", "rU")
+        handle = open(self.prefix + ".mfe")
 
         #Skip the comments of the text file
         file = handle.readlines()
@@ -703,7 +703,7 @@ class NuPACK(dict):
     #Output: total sequence length and minimum free energy
     #Output: list of base pairings describing the secondary structure
 
-        handle = open(self.prefix+".subopt", "rU")
+        handle = open(self.prefix+".subopt")
 
         #Skip the comments of the text file
         line = handle.readline()
@@ -961,6 +961,28 @@ class NuPACK(dict):
         #Close the file. Done.
         handle.close()
 
+#NuPACK files cleanup
+def TmpCleaner():
+    #Checks if Nupack is running
+    subprocess.call(
+        "ps -A | grep 'complexes' > cleanupcheck",
+        shell=True)
+
+    subprocess.call(
+        "ps -A| grep 'concentrations' >> cleanupcheck",
+        shell=True)
+
+    if not sum(1 for line in open('cleanupcheck')):
+        #not using os module because it is more simple this way
+        subprocess.call(
+            'rm -r {}/tmp*'.format(
+                os.path.dirname(os.path.realpath(__file__))),
+            shell=True)
+
+        os.remove('cleanupcheck')
+
+    return None
+
 
 if __name__ == "__main__":
 
@@ -983,7 +1005,7 @@ if __name__ == "__main__":
     strand_compositions = test["ordered_composition"]
     num_complexes = len(strand_compositions)
     num_strands = len(sequences)
-
+    
     for counter in range(num_complexes):
         output = "Complex #" + str(counter+1) + " composition: ("
         for strand_id in strand_compositions[counter][0:num_strands-1]:
@@ -1008,7 +1030,5 @@ if __name__ == "__main__":
     #num_complexes = test["mfe_NumStructs"]  #Number of degenerate complexes (same energy)
     #dG_mfe = test["mfe_energy"]
     #print "There are ", num_complexes, " configuration(s) with a minimum free energy of ", dG_mfe, " kcal/mol."
-
-
 
 
