@@ -1,5 +1,5 @@
 # Automated-sequence-design-of-nucleic-acid-hybridization-reactions-for-microRNA-detection
-MicroRNA can be found in a variety of biological samples and then they represent important molecular markers for early diagnostic strategies. This work consists in an automated sequence design algorithm of nucleic acid hybridization reactions for microRNA detection.
+MicroRNA can be found in a variety of biological samples and then they represent important molecular markers for early diagnostic strategies. This work consists in an automated sequence design algorithm of nucleic acid hybridization reactions for microRNA detection. See https://riunet.upv.es/handle/10251/125058 for full work.
 
 To employ this script, it is crucial to have a Python version 3.4 or higher, and the following modules and packages:
 
